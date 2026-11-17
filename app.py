@@ -41,6 +41,19 @@ def carregar(fonte) -> pd.DataFrame:
     df["hora"] = df["data_hora"].dt.hour
     df["bomba_on"] = df["estado_bomba"].eq("Ligada")
     df["intervalo_min"] = df["data_hora"].diff().dt.total_seconds() / 60
+    # variação da umidade em p.p./hora, só entre leituras seguidas com bomba desligada
+    ant_on = df["bomba_on"].shift(fill_value=True)
+    ant_um = df["umidade_percentual"].shift()
+    valido = (
+        ~df["bomba_on"] & ~ant_on & (df["intervalo_min"] <= LIMITE_LACUNA_MIN)
+        & df["umidade_percentual"].between(0.01, 99.99) & ant_um.between(0.01, 99.99)
+    )
+    taxa = (df["umidade_percentual"] - ant_um) / (df["intervalo_min"] / 60)
+    df["taxa_pph"] = taxa.where(valido)
+    df["periodo_dia"] = pd.cut(
+        df["hora"], bins=[-1, 5, 11, 17, 23],
+        labels=["Madrugada (0-5h)", "Manhã (6-11h)", "Tarde (12-17h)", "Noite (18-23h)"],
+    )
     return df
 
 
@@ -150,8 +163,8 @@ k3.metric("Acionamentos", f"{int(df['bomba_on'].sum())}")
 k4.metric("Tempo de bomba", f"{df['tempo_bomba_segundos'].sum():.0f} s")
 k5.metric(f"Tempo abaixo de {limiar}%", f"{(df['umidade_percentual'] < limiar).mean() * 100:.1f}%")
 
-aba1, aba2, aba3, aba4, aba5 = st.tabs(
-    ["Visão geral", "Padrões", "Eficácia da irrigação", "Qualidade dos dados", "Dados"]
+aba1, aba2, aba_est, aba3, aba4, aba5 = st.tabs(
+    ["Visão geral", "Padrões", "Estatísticas", "Eficácia da irrigação", "Qualidade dos dados", "Dados"]
 )
 
 # ----------------------------------------------------------------------------
@@ -233,6 +246,111 @@ with aba2:
     st.plotly_chart(estilo(fig), width="stretch")
     st.caption(f"Correlação ADC × umidade: {df['valor_adc'].corr(df['umidade_percentual']):.3f}. "
                "Quanto maior o ADC, mais seco o solo.")
+
+# ----------------------------------------------------------------------------
+# Estatísticas
+# ----------------------------------------------------------------------------
+with aba_est:
+    um = df["umidade_percentual"]
+
+    st.subheader("Resumo estatístico")
+    def resumo(serie):
+        return {
+            "Leituras": serie.count(), "Média": serie.mean(), "Mediana": serie.median(),
+            "Desvio padrão": serie.std(), "Coef. de variação (%)": serie.std() / serie.mean() * 100,
+            "Mínimo": serie.min(), "P5": serie.quantile(.05), "P25": serie.quantile(.25),
+            "P75": serie.quantile(.75), "P95": serie.quantile(.95), "Máximo": serie.max(),
+            "Assimetria": serie.skew(),
+        }
+    tabela = pd.DataFrame({"Umidade (%)": resumo(um), "ADC (bruto)": resumo(df["valor_adc"])}).round(2)
+    st.dataframe(tabela, width="stretch")
+    st.caption("Assimetria negativa indica que a maior parte das leituras está em valores altos de umidade, "
+               "com uma cauda de leituras secas.")
+
+    st.subheader("Faixas de umidade")
+    faixas = pd.cut(
+        um, bins=[-0.01, limiar, 60, 90, 100],
+        labels=[f"Crítica (< {limiar}%)", f"Atenção ({limiar}-60%)", "Adequada (60-90%)", "Saturada (> 90%)"],
+    )
+    fx = faixas.value_counts(normalize=True).sort_index().mul(100).round(1).reset_index()
+    fx.columns = ["Faixa", "% das leituras"]
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.dataframe(fx, hide_index=True, width="stretch")
+    with c2:
+        fig = px.bar(fx, x="% das leituras", y="Faixa", orientation="h",
+                     color="Faixa", color_discrete_sequence=[BOMBA, SOLO, OK, AGUA])
+        fig.update_layout(showlegend=False, yaxis_title=None)
+        st.plotly_chart(estilo(fig, 260), width="stretch")
+
+    st.subheader("Comparação por período do dia")
+    por_periodo = df.groupby("periodo_dia", observed=True).agg(
+        leituras=("umidade_percentual", "count"),
+        media=("umidade_percentual", "mean"),
+        mediana=("umidade_percentual", "median"),
+        desvio=("umidade_percentual", "std"),
+        pct_critico=("umidade_percentual", lambda x: (x < limiar).mean() * 100),
+        acionamentos=("bomba_on", "sum"),
+    ).round(2)
+    por_periodo.columns = ["Leituras", "Média (%)", "Mediana (%)", "Desvio padrão",
+                           f"% abaixo de {limiar}%", "Acionamentos"]
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        st.dataframe(por_periodo, width="stretch")
+    with c2:
+        fig = px.box(df, x="periodo_dia", y="umidade_percentual", color_discrete_sequence=[AGUA],
+                     category_orders={"periodo_dia": list(por_periodo.index)})
+        fig.update_layout(xaxis_title=None, yaxis_title="Umidade (%)")
+        st.plotly_chart(estilo(fig, 300), width="stretch")
+
+    st.subheader("Velocidade de secagem do solo")
+    taxas = df["taxa_pph"].dropna()
+    if len(taxas) < 5:
+        st.info("Poucas leituras consecutivas sem bomba no filtro atual para calcular a secagem.")
+    else:
+        secando = taxas[taxas < 0]
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Secagem média", f"{secando.mean():.1f} p.p./h" if len(secando) else "-")
+        s2.metric("Secagem mais rápida (P5)", f"{taxas.quantile(.05):.1f} p.p./h")
+        s3.metric("Intervalos analisados", len(taxas))
+        fig = px.box(df.dropna(subset=["taxa_pph"]), x="hora", y="taxa_pph", color_discrete_sequence=[SOLO])
+        fig.add_hline(y=0, line_color=TINTA, line_width=1)
+        fig.update_layout(xaxis_title="Hora do dia", yaxis_title="Variação da umidade (p.p./h)")
+        st.plotly_chart(estilo(fig, 340), width="stretch")
+        st.caption("Considera só leituras seguidas (até 30 min) com a bomba desligada e sensor fora de 0% e 100%. "
+                   "Valores negativos indicam solo secando.")
+
+    st.subheader("Em que umidade a bomba costuma ligar?")
+    bins = list(range(0, 101, 10))
+    df_b = df.assign(faixa_um=pd.cut(um, bins=bins, include_lowest=True))
+    prob = df_b.groupby("faixa_um", observed=True)["bomba_on"].agg(["mean", "count"]).reset_index()
+    prob["faixa"] = prob["faixa_um"].astype(str)
+    prob["pct"] = (prob["mean"] * 100).round(1)
+    fig = px.bar(prob, x="faixa", y="pct", text="count", color_discrete_sequence=[BOMBA])
+    fig.update_traces(texttemplate="n=%{text}", textposition="outside")
+    fig.update_layout(xaxis_title="Faixa de umidade (%)", yaxis_title="% das leituras com bomba ligada")
+    st.plotly_chart(estilo(fig, 340), width="stretch")
+    st.caption("Mostra a regra de acionamento na prática: onde a barra sobe, a bomba passa a ligar. "
+               "Se houver bomba ligada em faixas altas, vale checar o limiar configurado no equipamento.")
+
+    st.subheader("Correlações")
+    cor = pd.DataFrame({
+        "Umidade": um, "ADC": df["valor_adc"], "Hora": df["hora"], "Bomba ligada": df["bomba_on"].astype(int),
+    }).corr().round(2)
+    fig = px.imshow(cor, text_auto=True, zmin=-1, zmax=1,
+                    color_continuous_scale=[[0, SOLO], [0.5, "#FFFFFF"], [1, AGUA]])
+    st.plotly_chart(estilo(fig, 380), width="stretch")
+
+    st.subheader("Estatísticas por dia")
+    dia = df.groupby("data").agg(
+        media=("umidade_percentual", "mean"), desvio=("umidade_percentual", "std"),
+        minima=("umidade_percentual", "min"), maxima=("umidade_percentual", "max"),
+        pct_critico=("umidade_percentual", lambda x: (x < limiar).mean() * 100),
+        acionamentos=("bomba_on", "sum"), segundos=("tempo_bomba_segundos", "sum"),
+    ).round(2)
+    dia.columns = ["Média (%)", "Desvio padrão", "Mínima (%)", "Máxima (%)",
+                   f"% abaixo de {limiar}%", "Acionamentos", "Segundos de bomba"]
+    st.dataframe(dia, width="stretch")
 
 # ----------------------------------------------------------------------------
 # Eficácia
