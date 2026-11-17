@@ -10,19 +10,22 @@ ARQUIVO_PADRAO = Path(__file__).parent / "base_irrigacao_2026.csv"
 LIMITE_LACUNA_MIN = 30  # acima disso, considera que o sensor ficou sem enviar dados
 
 # Paleta: água, solo e acionamento da bomba
-AGUA = "#1B6F8A"
-SOLO = "#8A5A3B"
-BOMBA = "#E4572E"
-OK = "#4C9A6A"
-TINTA = "#1F2A2E"
+AGUA = "#8E6BBF"        # lilás: umidade
+BOMBA = "#F2B705"       # amarelo: bomba / alerta
+SOLO = "#5B8C3E"        # verde folha: apoio
+OK = "#4F7942"          # verde escuro
+VERDE_CLARO = "#A9C98B"
+LILAS_CLARO = "#EFE9F7"
+AMARELO_CLARO = "#FBEFB8"
+TINTA = "#2D3B2A"
 
-st.set_page_config(page_title="Irrigação 2026", page_icon="💧", layout="wide")
+st.set_page_config(page_title="Minha horta", page_icon="🌼", layout="wide")
 
 st.markdown(
     """
     <style>
       .block-container {padding-top: 2rem;}
-      [data-testid="stMetric"] {border-left: 4px solid #1B6F8A; padding-left: .8rem;}
+      [data-testid="stMetric"] {border-left: 4px solid #F2B705; padding-left: .8rem;}
       [data-testid="stMetricValue"] {font-size: 1.8rem;}
     </style>
     """,
@@ -151,7 +154,7 @@ ev = eventos_todos[
 # ----------------------------------------------------------------------------
 # Cabeçalho e KPIs
 # ----------------------------------------------------------------------------
-st.title("Irrigação automatizada: umidade do solo e bomba")
+st.title("🌼 Horta: umidade do solo e irrigação")
 st.caption(
     f"{len(df)} leituras de {df['data_hora'].min():%d/%m/%Y %H:%M} a {df['data_hora'].max():%d/%m/%Y %H:%M}"
 )
@@ -184,7 +187,7 @@ with aba1:
     fig.add_trace(
         go.Scatter(
             x=on["data_hora"], y=on["umidade_percentual"], mode="markers",
-            name="Bomba ligada", marker=dict(color=BOMBA, size=8, line=dict(color="white", width=1)),
+            name="Bomba ligada", marker=dict(color=BOMBA, size=9, line=dict(color=TINTA, width=1)),
         )
     )
     fig.add_hline(y=limiar, line_dash="dash", line_color=SOLO,
@@ -217,7 +220,7 @@ with aba2:
     mapa = df.pivot_table(index="hora", columns="data", values="umidade_percentual", aggfunc="mean")
     fig = px.imshow(
         mapa, aspect="auto", origin="lower",
-        color_continuous_scale=[[0, SOLO], [0.5, "#F2E9D8"], [1, AGUA]],
+        color_continuous_scale=[[0, BOMBA], [0.5, "#F7F3E3"], [1, AGUA]],
         labels=dict(x="Dia", y="Hora", color="Umidade (%)"),
     )
     st.plotly_chart(estilo(fig, 420), width="stretch")
@@ -279,7 +282,7 @@ with aba_est:
         st.dataframe(fx, hide_index=True, width="stretch")
     with c2:
         fig = px.bar(fx, x="% das leituras", y="Faixa", orientation="h",
-                     color="Faixa", color_discrete_sequence=[BOMBA, SOLO, OK, AGUA])
+                     color="Faixa", color_discrete_sequence=[BOMBA, VERDE_CLARO, OK, AGUA])
         fig.update_layout(showlegend=False, yaxis_title=None)
         st.plotly_chart(estilo(fig, 260), width="stretch")
 
@@ -338,7 +341,7 @@ with aba_est:
         "Umidade": um, "ADC": df["valor_adc"], "Hora": df["hora"], "Bomba ligada": df["bomba_on"].astype(int),
     }).corr().round(2)
     fig = px.imshow(cor, text_auto=True, zmin=-1, zmax=1,
-                    color_continuous_scale=[[0, SOLO], [0.5, "#FFFFFF"], [1, AGUA]])
+                    color_continuous_scale=[[0, BOMBA], [0.5, "#FFFFFF"], [1, AGUA]])
     st.plotly_chart(estilo(fig, 380), width="stretch")
 
     st.subheader("Estatísticas por dia")
