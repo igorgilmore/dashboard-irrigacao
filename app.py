@@ -1,452 +1,720 @@
-from pathlib import Path
 
-import numpy as np
+import streamlit as st
 import pandas as pd
+import psycopg2
 import plotly.express as px
 import plotly.graph_objects as go
-import streamlit as st
 
-ARQUIVO_PADRAO = Path(__file__).parent / "base_irrigacao_2026.csv"
-LIMITE_LACUNA_MIN = 30  # acima disso, considera que o sensor ficou sem enviar dados
+from datetime import datetime
 
-# Paleta: água, solo e acionamento da bomba
-AGUA = "#8E6BBF"        # lilás: umidade
-BOMBA = "#F2B705"       # amarelo: bomba / alerta
-SOLO = "#5B8C3E"        # verde folha: apoio
-OK = "#4F7942"          # verde escuro
-VERDE_CLARO = "#A9C98B"
-LILAS_CLARO = "#EFE9F7"
-AMARELO_CLARO = "#FBEFB8"
-TINTA = "#2D3B2A"
+# =========================================================
+# CONFIGURAÇÃO DA PÁGINA
+# =========================================================
 
-st.set_page_config(page_title="Minha horta", page_icon="🌼", layout="wide")
-
-st.markdown(
-    """
-    <style>
-      .block-container {padding-top: 2rem;}
-      [data-testid="stMetric"] {border-left: 4px solid #F2B705; padding-left: .8rem;}
-      [data-testid="stMetricValue"] {font-size: 1.8rem;}
-    </style>
-    """,
-    unsafe_allow_html=True,
+st.set_page_config(
+    page_title="Horta Inteligente | Monitoramento",
+    page_icon="🌱",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
+# =========================================================
+# IDENTIDADE VISUAL
+# =========================================================
 
-# ----------------------------------------------------------------------------
-# Dados
-# ----------------------------------------------------------------------------
-@st.cache_data
-def carregar(fonte) -> pd.DataFrame:
-    df = pd.read_csv(fonte, parse_dates=["data_hora"])
-    df = df.sort_values("data_hora").reset_index(drop=True)
-    df["data"] = df["data_hora"].dt.date
-    df["hora"] = df["data_hora"].dt.hour
-    df["bomba_on"] = df["estado_bomba"].eq("Ligada")
-    df["intervalo_min"] = df["data_hora"].diff().dt.total_seconds() / 60
-    # variação da umidade em p.p./hora, só entre leituras seguidas com bomba desligada
-    ant_on = df["bomba_on"].shift(fill_value=True)
-    ant_um = df["umidade_percentual"].shift()
-    valido = (
-        ~df["bomba_on"] & ~ant_on & (df["intervalo_min"] <= LIMITE_LACUNA_MIN)
-        & df["umidade_percentual"].between(0.01, 99.99) & ant_um.between(0.01, 99.99)
+st.markdown("""
+<style>
+    .stApp {
+        background-color: #f5f7f2;
+    }
+
+    h1, h2, h3 {
+        color: #18392b;
+    }
+
+    [data-testid="stMetric"] {
+        background-color: white;
+        border: 1px solid #e1e8df;
+        padding: 18px;
+        border-radius: 12px;
+    }
+
+    div[data-testid="stSidebar"] {
+        background-color: #18392b;
+    }
+
+    div[data-testid="stSidebar"] * {
+        color: white;
+    }
+
+    .intro-box {
+        background-color: #e6f1e7;
+        padding: 24px;
+        border-radius: 15px;
+        border-left: 5px solid #39834c;
+    }
+
+    .small-text {
+        color: #65776b;
+        font-size: 14px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# =========================================================
+# CONEXÃO COM O POSTGRESQL
+# =========================================================
+
+@st.cache_data(ttl=60)
+def carregar_dados():
+
+    conn = psycopg2.connect(
+        host=st.secrets["postgres"]["host"],
+        port=st.secrets["postgres"]["port"],
+        database=st.secrets["postgres"]["database"],
+        user=st.secrets["postgres"]["user"],
+        password=st.secrets["postgres"]["password"]
     )
-    taxa = (df["umidade_percentual"] - ant_um) / (df["intervalo_min"] / 60)
-    df["taxa_pph"] = taxa.where(valido)
-    df["periodo_dia"] = pd.cut(
-        df["hora"], bins=[-1, 5, 11, 17, 23],
-        labels=["Madrugada (0-5h)", "Manhã (6-11h)", "Tarde (12-17h)", "Noite (18-23h)"],
+
+    query = """
+        SELECT
+            id,
+            data_hora,
+            umidade_percentual,
+            valor_adc,
+            tempo_bomba_segundos,
+            estado_bomba
+        FROM leituras
+        ORDER BY data_hora ASC;
+    """
+
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+
+    df["data_hora"] = pd.to_datetime(df["data_hora"])
+    df["umidade_percentual"] = pd.to_numeric(
+        df["umidade_percentual"], errors="coerce"
     )
+    df["valor_adc"] = pd.to_numeric(
+        df["valor_adc"], errors="coerce"
+    )
+    df["tempo_bomba_segundos"] = pd.to_numeric(
+        df["tempo_bomba_segundos"], errors="coerce"
+    )
+
+    df["estado_bomba"] = (
+        df["estado_bomba"].astype(str).str.strip().str.capitalize()
+    )
+
     return df
 
 
-@st.cache_data
-def detectar_eventos(df: pd.DataFrame) -> pd.DataFrame:
-    """Agrupa leituras consecutivas com a bomba ligada em um único evento de irrigação."""
-    novo = (df["bomba_on"] != df["bomba_on"].shift()) | (df["intervalo_min"] > LIMITE_LACUNA_MIN)
-    grupo = novo.cumsum()
-    linhas = []
-    for _, d in df[df["bomba_on"]].groupby(grupo[df["bomba_on"]]):
-        i0, i1 = d.index[0], d.index[-1]
-        depois = df.loc[i1 + 1, "umidade_percentual"] if i1 + 1 < len(df) else np.nan
-        linhas.append(
-            {
-                "inicio": d["data_hora"].iloc[0],
-                "fim": d["data_hora"].iloc[-1],
-                "leituras_com_bomba": len(d),
-                "segundos_bomba": d["tempo_bomba_segundos"].sum(),
-                "umidade_inicial": d["umidade_percentual"].iloc[0],
-                "umidade_final": depois,
+# =========================================================
+# CARREGAMENTO DOS DADOS
+# =========================================================
+
+try:
+    df = carregar_dados()
+
+except Exception as e:
+    st.error("Não foi possível conectar ao banco de dados.")
+    st.error(f"Erro: {e}")
+
+    st.info(
+        "Verifique as credenciais, a conexão PostgreSQL "
+        "e a disponibilidade do servidor."
+    )
+
+    st.stop()
+
+
+# =========================================================
+# MENU LATERAL
+# =========================================================
+
+st.sidebar.title("🌱 Horta Inteligente")
+
+st.sidebar.markdown("""
+Projeto de monitoramento de umidade do solo
+e automação de irrigação.
+""")
+
+pagina = st.sidebar.radio(
+    "Navegação",
+    [
+        "Apresentação",
+        "Coleta de dados",
+        "Armazenamento",
+        "Análise dos dados",
+        "Validação"
+    ]
+)
+
+st.sidebar.divider()
+
+st.sidebar.caption("Projeto acadêmico • Ciência de Dados")
+
+# =========================================================
+# INDICADORES GERAIS
+# =========================================================
+
+total_registros = len(df)
+
+umidade_media = df["umidade_percentual"].mean()
+
+umidade_minima = df["umidade_percentual"].min()
+
+umidade_maxima = df["umidade_percentual"].max()
+
+total_bomba_ligada = (
+    df["estado_bomba"].str.lower() == "ligada"
+).sum()
+
+total_bomba_desligada = (
+    df["estado_bomba"].str.lower() == "desligada"
+).sum()
+
+tempo_total_bomba = df["tempo_bomba_segundos"].sum()
+
+# =========================================================
+# PÁGINA 1 - APRESENTAÇÃO
+# =========================================================
+
+if pagina == "Apresentação":
+
+    st.title("🌱 Horta Inteligente")
+
+    st.markdown("""
+    <div class="intro-box">
+        <h2>Monitoramento da umidade do solo e automação da irrigação</h2>
+
+        <p>
+        Este projeto apresenta uma proposta de monitoramento da umidade
+        do solo por meio de dados, armazenamento em banco de dados
+        e análise das informações utilizando Python.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.write("")
+
+    st.markdown("### Objetivo do projeto")
+
+    st.write("""
+    Utilizar tecnologia e análise de dados para acompanhar os níveis
+    de umidade do solo e compreender o funcionamento de um sistema
+    de irrigação automatizado, contribuindo para um uso mais eficiente
+    dos recursos hídricos.
+    """)
+
+    st.markdown("### Etapas do projeto")
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric("Etapa 01", "Coleta")
+    c2.metric("Etapa 02", "Python")
+    c3.metric("Etapa 03", "PostgreSQL")
+    c4.metric("Etapa 04", "Análise")
+
+    st.markdown("---")
+
+    st.subheader("Visão geral dos dados")
+
+    c1, c2, c3 = st.columns(3)
+
+    c1.metric("Registros armazenados", f"{total_registros:,}".replace(",", "."))
+
+    c2.metric(
+        "Umidade média",
+        f"{umidade_media:.2f}%" if pd.notna(umidade_media) else "N/A"
+    )
+
+    c3.metric(
+        "Acionamentos registrados",
+        int(total_bomba_ligada)
+    )
+
+    st.markdown("""
+    ### O que será apresentado?
+
+    - Como os dados foram coletados;
+    - Como os dados foram conectados e armazenados;
+    - Como as informações foram analisadas;
+    - Quais resultados foram identificados;
+    - Como foi realizada a verificação da base.
+    """)
+
+# =========================================================
+# PÁGINA 2 - COLETA
+# =========================================================
+
+elif pagina == "Coleta de dados":
+
+    st.title("📡 Coleta de dados")
+
+    st.write("""
+    A coleta de dados é a etapa responsável por obter as informações
+    relacionadas à umidade do solo e ao funcionamento do sistema de irrigação.
+    Essas informações são posteriormente utilizadas no processamento,
+    armazenamento e análise.
+    """)
+
+    st.subheader("Fluxo de coleta")
+
+    st.markdown("""
+    **Sensor de umidade → Arduino UNO → Python → PostgreSQL**
+
+    - O sensor fornece valores relacionados à umidade do solo.
+    - O Arduino realiza a leitura do sinal analógico.
+    - Os dados são transmitidos para o Python.
+    - O Python organiza as informações para armazenamento.
+    """)
+
+    st.info(
+        "Neste projeto, os dados utilizados foram simulados para representar "
+        "as leituras do sistema durante o período de monitoramento. "
+        "Não devem ser interpretados como medições físicas reais."
+    )
+
+    st.subheader("Variáveis coletadas")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("""
+        **Umidade percentual**
+
+        Representa o percentual de umidade utilizado
+        para acompanhamento das condições do solo.
+        """)
+
+        st.markdown("""
+        **Valor ADC**
+
+        Representa o valor numérico obtido a partir
+        da leitura analógica do sensor.
+        """)
+
+    with col2:
+        st.markdown("""
+        **Data e hora**
+
+        Permite identificar o momento em que
+        cada leitura foi registrada.
+        """)
+
+        st.markdown("""
+        **Estado da bomba**
+
+        Identifica se o sistema registrou
+        a bomba ligada ou desligada.
+        """)
+
+    st.subheader("Visualização das leituras")
+
+    st.dataframe(
+        df[[
+            "data_hora",
+            "umidade_percentual",
+            "valor_adc",
+            "tempo_bomba_segundos",
+            "estado_bomba"
+        ]],
+        use_container_width=True,
+        hide_index=True
+    )
+
+# =========================================================
+# PÁGINA 3 - ARMAZENAMENTO
+# =========================================================
+
+elif pagina == "Armazenamento":
+
+    st.title("🗄️ Armazenamento dos dados")
+
+    st.write("""
+    Após o processamento em Python, os dados foram armazenados
+    em um banco de dados relacional PostgreSQL, permitindo sua
+    organização, consulta e utilização nas análises.
+    """)
+
+    st.subheader("Tecnologias utilizadas")
+
+    c1, c2 = st.columns(2)
+
+    c1.markdown("""
+    ### Python
+
+    Utilizado na conexão com o banco de dados,
+    manipulação e análise das informações.
+    """)
+
+    c2.markdown("""
+    ### PostgreSQL
+
+    Sistema gerenciador de banco de dados relacional
+    utilizado para armazenar as leituras.
+    """)
+
+    st.subheader("Estrutura da tabela `leituras`")
+
+    estrutura = pd.DataFrame({
+        "Coluna": [
+            "id",
+            "data_hora",
+            "umidade_percentual",
+            "valor_adc",
+            "tempo_bomba_segundos",
+            "estado_bomba"
+        ],
+        "Tipo": [
+            "SERIAL / INTEGER",
+            "TIMESTAMP",
+            "NUMERIC",
+            "INTEGER",
+            "FLOAT",
+            "VARCHAR"
+        ],
+        "Descrição": [
+            "Identificador do registro",
+            "Data e hora da leitura",
+            "Umidade registrada",
+            "Valor analógico do sensor",
+            "Tempo de funcionamento da bomba",
+            "Estado da bomba"
+        ]
+    })
+
+    st.dataframe(estrutura, use_container_width=True, hide_index=True)
+
+    st.subheader("Consulta SQL utilizada")
+
+    st.code("""
+SELECT
+    id,
+    data_hora,
+    umidade_percentual,
+    valor_adc,
+    tempo_bomba_segundos,
+    estado_bomba
+FROM leituras
+ORDER BY data_hora ASC;
+    """, language="sql")
+
+    st.subheader("Dados armazenados")
+
+    st.metric("Total de registros no PostgreSQL", total_registros)
+
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+# =========================================================
+# PÁGINA 4 - ANÁLISE
+# =========================================================
+
+elif pagina == "Análise dos dados":
+
+    st.title("📊 Análise dos dados")
+
+    st.write("""
+    Nesta etapa, os registros armazenados foram utilizados para
+    gerar indicadores e visualizações, permitindo compreender
+    o comportamento da umidade e os registros do sistema de irrigação.
+    """)
+
+    st.subheader("Filtros")
+
+    data_min = df["data_hora"].min().date()
+    data_max = df["data_hora"].max().date()
+
+    intervalo = st.date_input(
+        "Selecione o intervalo de análise",
+        value=(data_min, data_max),
+        min_value=data_min,
+        max_value=data_max
+    )
+
+    if isinstance(intervalo, tuple) and len(intervalo) == 2:
+
+        data_inicio, data_fim = intervalo
+
+        df_filtrado = df[
+            (df["data_hora"].dt.date >= data_inicio) &
+            (df["data_hora"].dt.date <= data_fim)
+        ]
+
+    else:
+        df_filtrado = df.copy()
+
+    if df_filtrado.empty:
+
+        st.warning("Não há dados para o período selecionado.")
+
+    else:
+
+        media = df_filtrado["umidade_percentual"].mean()
+        minimo = df_filtrado["umidade_percentual"].min()
+        maximo = df_filtrado["umidade_percentual"].max()
+
+        ligado = (
+            df_filtrado["estado_bomba"].str.lower() == "ligada"
+        ).sum()
+
+        k1, k2, k3, k4 = st.columns(4)
+
+        k1.metric("Umidade média", f"{media:.2f}%")
+        k2.metric("Umidade mínima", f"{minimo:.2f}%")
+        k3.metric("Umidade máxima", f"{maximo:.2f}%")
+        k4.metric("Registros", len(df_filtrado))
+
+        st.markdown("---")
+
+        # GRÁFICO DE UMIDADE
+
+        st.subheader("Comportamento da umidade ao longo do tempo")
+
+        fig_umidade = px.line(
+            df_filtrado,
+            x="data_hora",
+            y="umidade_percentual",
+            markers=True,
+            title="Variação da umidade do solo",
+            labels={
+                "data_hora": "Data e hora",
+                "umidade_percentual": "Umidade (%)"
             }
         )
-    ev = pd.DataFrame(linhas)
-    if not ev.empty:
-        ev["ganho"] = ev["umidade_final"] - ev["umidade_inicial"]
-    return ev
 
-
-def com_lacunas(df: pd.DataFrame) -> pd.DataFrame:
-    """Insere NaN nas lacunas para o gráfico de linha não ligar pontos distantes."""
-    buracos = df[df["intervalo_min"] > LIMITE_LACUNA_MIN]
-    if buracos.empty:
-        return df
-    vazios = pd.DataFrame(
-        {"data_hora": buracos["data_hora"] - pd.Timedelta(minutes=1), "umidade_percentual": np.nan}
-    )
-    return pd.concat([df, vazios]).sort_values("data_hora")
-
-
-def estilo(fig, altura=380):
-    fig.update_layout(
-        height=altura,
-        margin=dict(l=10, r=10, t=40, b=10),
-        font=dict(color=TINTA),
-        plot_bgcolor="rgba(0,0,0,0)",
-        paper_bgcolor="rgba(0,0,0,0)",
-        legend=dict(orientation="h", y=1.12, x=0),
-    )
-    fig.update_xaxes(showgrid=False)
-    fig.update_yaxes(gridcolor="rgba(128,128,128,.2)")
-    return fig
-
-
-# ----------------------------------------------------------------------------
-# Barra lateral
-# ----------------------------------------------------------------------------
-st.sidebar.header("Filtros")
-
-fonte = ARQUIVO_PADRAO if ARQUIVO_PADRAO.exists() else None
-enviado = st.sidebar.file_uploader("Trocar a base (CSV)", type="csv")
-if enviado is not None:
-    fonte = enviado
-if fonte is None:
-    st.warning("Coloque o arquivo `base_irrigacao_2026.csv` na pasta do app ou envie um CSV na barra lateral.")
-    st.stop()
-
-base = carregar(fonte)
-eventos_todos = detectar_eventos(base)
-
-d_min, d_max = base["data"].min(), base["data"].max()
-periodo = st.sidebar.date_input("Período", (d_min, d_max), min_value=d_min, max_value=d_max)
-if len(periodo) != 2:
-    st.info("Selecione a data inicial e a final.")
-    st.stop()
-
-horas = st.sidebar.slider("Faixa de horário", 0, 23, (0, 23))
-limiar = st.sidebar.slider("Umidade crítica (%)", 5, 60, 30)
-so_bomba = st.sidebar.checkbox("Mostrar só leituras com bomba ligada")
-
-df = base[
-    (base["data"] >= periodo[0])
-    & (base["data"] <= periodo[1])
-    & (base["hora"].between(*horas))
-]
-if so_bomba:
-    df = df[df["bomba_on"]]
-if df.empty:
-    st.warning("Nenhuma leitura com esses filtros.")
-    st.stop()
-
-ev = eventos_todos[
-    (eventos_todos["inicio"].dt.date >= periodo[0]) & (eventos_todos["inicio"].dt.date <= periodo[1])
-] if not eventos_todos.empty else eventos_todos
-
-# ----------------------------------------------------------------------------
-# Cabeçalho e KPIs
-# ----------------------------------------------------------------------------
-st.title("🌼 Horta: umidade do solo e irrigação")
-st.caption(
-    f"{len(df)} leituras de {df['data_hora'].min():%d/%m/%Y %H:%M} a {df['data_hora'].max():%d/%m/%Y %H:%M}"
-)
-
-k1, k2, k3, k4, k5 = st.columns(5)
-k1.metric("Umidade média", f"{df['umidade_percentual'].mean():.1f}%")
-k2.metric("Umidade mínima", f"{df['umidade_percentual'].min():.1f}%")
-k3.metric("Acionamentos", f"{int(df['bomba_on'].sum())}")
-k4.metric("Tempo de bomba", f"{df['tempo_bomba_segundos'].sum():.0f} s")
-k5.metric(f"Tempo abaixo de {limiar}%", f"{(df['umidade_percentual'] < limiar).mean() * 100:.1f}%")
-
-aba1, aba2, aba_est, aba3, aba4, aba5 = st.tabs(
-    ["Visão geral", "Padrões", "Estatísticas", "Eficácia da irrigação", "Qualidade dos dados", "Dados"]
-)
-
-# ----------------------------------------------------------------------------
-# Visão geral
-# ----------------------------------------------------------------------------
-with aba1:
-    st.subheader("Umidade ao longo do tempo")
-    linha = com_lacunas(df)
-    fig = go.Figure()
-    fig.add_trace(
-        go.Scatter(
-            x=linha["data_hora"], y=linha["umidade_percentual"], mode="lines",
-            name="Umidade (%)", line=dict(color=AGUA, width=2), connectgaps=False,
+        fig_umidade.update_layout(
+            template="plotly_white",
+            hovermode="x unified"
         )
-    )
-    on = df[df["bomba_on"]]
-    fig.add_trace(
-        go.Scatter(
-            x=on["data_hora"], y=on["umidade_percentual"], mode="markers",
-            name="Bomba ligada", marker=dict(color=BOMBA, size=9, line=dict(color=TINTA, width=1)),
+
+        st.plotly_chart(fig_umidade, use_container_width=True)
+
+        # HISTOGRAMA
+
+        st.subheader("Distribuição dos níveis de umidade")
+
+        fig_hist = px.histogram(
+            df_filtrado,
+            x="umidade_percentual",
+            nbins=20,
+            title="Distribuição das leituras de umidade",
+            labels={
+                "umidade_percentual": "Umidade (%)",
+                "count": "Frequência"
+            }
         )
+
+        fig_hist.update_layout(template="plotly_white")
+
+        st.plotly_chart(fig_hist, use_container_width=True)
+
+        # ADC
+
+        st.subheader("Valores analógicos do sensor")
+
+        fig_adc = px.line(
+            df_filtrado,
+            x="data_hora",
+            y="valor_adc",
+            title="Variação do valor ADC",
+            labels={
+                "data_hora": "Data e hora",
+                "valor_adc": "Valor ADC"
+            }
+        )
+
+        fig_adc.update_layout(template="plotly_white")
+
+        st.plotly_chart(fig_adc, use_container_width=True)
+
+        # BOMBA
+
+        st.subheader("Estado da bomba")
+
+        estados = (
+            df_filtrado["estado_bomba"]
+            .value_counts()
+            .reset_index()
+        )
+
+        estados.columns = ["Estado", "Quantidade"]
+
+        fig_bomba = px.pie(
+            estados,
+            names="Estado",
+            values="Quantidade",
+            title="Distribuição dos estados da bomba",
+            hole=0.45
+        )
+
+        st.plotly_chart(fig_bomba, use_container_width=True)
+
+        st.metric("Registros com bomba ligada", int(ligado))
+
+        # TEMPO DE BOMBA
+
+        st.subheader("Tempo de funcionamento da bomba")
+
+        fig_tempo = px.bar(
+            df_filtrado,
+            x="data_hora",
+            y="tempo_bomba_segundos",
+            title="Tempo de acionamento por registro",
+            labels={
+                "data_hora": "Data e hora",
+                "tempo_bomba_segundos": "Tempo (segundos)"
+            }
+        )
+
+        fig_tempo.update_layout(template="plotly_white")
+
+        st.plotly_chart(fig_tempo, use_container_width=True)
+
+        # TABELA ANALÍTICA
+
+        st.subheader("Resumo estatístico")
+
+        resumo = df_filtrado[
+            [
+                "umidade_percentual",
+                "valor_adc",
+                "tempo_bomba_segundos"
+            ]
+        ].describe().round(2)
+
+        st.dataframe(resumo, use_container_width=True)
+
+# =========================================================
+# PÁGINA 5 - VALIDAÇÃO
+# =========================================================
+
+elif pagina == "Validação":
+
+    st.title("✅ Verificação e validação dos dados")
+
+    st.write("""
+    Após o armazenamento e a análise, foi realizada uma etapa de
+    verificação para avaliar a integridade dos registros, identificar
+    possíveis inconsistências e conferir se os dados estavam adequados
+    para utilização.
+    """)
+
+    # VERIFICAÇÕES
+
+    duplicados = df["id"].duplicated().sum()
+
+    nulos = df.isnull().sum().sum()
+
+    umidade_fora = (
+        (df["umidade_percentual"] < 0) |
+        (df["umidade_percentual"] > 100)
+    ).sum()
+
+    estados_invalidos = (
+        ~df["estado_bomba"].str.lower().isin(["ligada", "desligada"])
+    ).sum()
+
+    ids_unicos = df["id"].nunique()
+
+    # RESULTADOS
+
+    st.subheader("Indicadores de qualidade")
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    c1.metric("IDs duplicados", int(duplicados))
+    c2.metric("Valores nulos", int(nulos))
+    c3.metric("Umidade inválida", int(umidade_fora))
+    c4.metric("Estados inválidos", int(estados_invalidos))
+
+    st.markdown("---")
+
+    verificacoes = pd.DataFrame({
+        "Verificação": [
+            "Quantidade de registros",
+            "Identificadores únicos",
+            "IDs duplicados",
+            "Valores nulos",
+            "Umidade entre 0% e 100%",
+            "Estado da bomba válido"
+        ],
+        "Resultado": [
+            total_registros,
+            ids_unicos,
+            int(duplicados),
+            int(nulos),
+            int(umidade_fora),
+            int(estados_invalidos)
+        ],
+        "Status": [
+            "Verificado",
+            "Verificado",
+            "OK" if duplicados == 0 else "Atenção",
+            "OK" if nulos == 0 else "Atenção",
+            "OK" if umidade_fora == 0 else "Atenção",
+            "OK" if estados_invalidos == 0 else "Atenção"
+        ]
+    })
+
+    st.subheader("Checklist de integridade")
+
+    st.dataframe(
+        verificacoes,
+        use_container_width=True,
+        hide_index=True
     )
-    fig.add_hline(y=limiar, line_dash="dash", line_color=SOLO,
-                  annotation_text=f"crítico ({limiar}%)", annotation_position="bottom right")
-    fig.update_yaxes(title="Umidade (%)", range=[-3, 103])
-    st.plotly_chart(estilo(fig, 420), width="stretch")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Acionamentos por dia")
-        por_dia = df.groupby("data")["bomba_on"].sum().reset_index(name="acionamentos")
-        fig = px.bar(por_dia, x="data", y="acionamentos", color_discrete_sequence=[BOMBA])
-        fig.update_layout(xaxis_title=None, yaxis_title="Leituras com bomba ligada")
-        st.plotly_chart(estilo(fig), width="stretch")
-    with c2:
-        st.subheader("Umidade média e mínima por dia")
-        resumo = df.groupby("data")["umidade_percentual"].agg(media="mean", minima="min").reset_index()
-        fig = go.Figure()
-        fig.add_trace(go.Bar(x=resumo["data"], y=resumo["media"], name="Média", marker_color=AGUA))
-        fig.add_trace(go.Scatter(x=resumo["data"], y=resumo["minima"], name="Mínima",
-                                 mode="lines+markers", line=dict(color=SOLO)))
-        fig.update_layout(xaxis_title=None, yaxis_title="Umidade (%)")
-        st.plotly_chart(estilo(fig), width="stretch")
+    # VERIFICAÇÃO DE DATA E ORGANIZAÇÃO
 
-# ----------------------------------------------------------------------------
-# Padrões
-# ----------------------------------------------------------------------------
-with aba2:
-    st.subheader("Em que horário o solo seca mais?")
-    mapa = df.pivot_table(index="hora", columns="data", values="umidade_percentual", aggfunc="mean")
-    fig = px.imshow(
-        mapa, aspect="auto", origin="lower",
-        color_continuous_scale=[[0, BOMBA], [0.5, "#F7F3E3"], [1, AGUA]],
-        labels=dict(x="Dia", y="Hora", color="Umidade (%)"),
-    )
-    st.plotly_chart(estilo(fig, 420), width="stretch")
+    datas_ordenadas = df["data_hora"].is_monotonic_increasing
 
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Umidade média por hora do dia")
-        por_hora = df.groupby("hora")["umidade_percentual"].mean().reset_index()
-        fig = px.line(por_hora, x="hora", y="umidade_percentual", markers=True,
-                      color_discrete_sequence=[AGUA])
-        fig.update_layout(xaxis_title="Hora", yaxis_title="Umidade média (%)")
-        st.plotly_chart(estilo(fig), width="stretch")
-    with c2:
-        st.subheader("Distribuição da umidade")
-        fig = px.histogram(df, x="umidade_percentual", nbins=25, color_discrete_sequence=[AGUA])
-        fig.add_vline(x=limiar, line_dash="dash", line_color=SOLO)
-        fig.update_layout(xaxis_title="Umidade (%)", yaxis_title="Leituras")
-        st.plotly_chart(estilo(fig), width="stretch")
+    st.subheader("Organização temporal")
 
-    st.subheader("Sensor: valor ADC × umidade")
-    fig = px.scatter(
-        df, x="valor_adc", y="umidade_percentual", color="estado_bomba",
-        color_discrete_map={"Ligada": BOMBA, "Desligada": AGUA}, opacity=0.7,
-        labels=dict(valor_adc="ADC (bruto)", umidade_percentual="Umidade (%)", estado_bomba="Bomba"),
-    )
-    st.plotly_chart(estilo(fig), width="stretch")
-    st.caption(f"Correlação ADC × umidade: {df['valor_adc'].corr(df['umidade_percentual']):.3f}. "
-               "Quanto maior o ADC, mais seco o solo.")
-
-# ----------------------------------------------------------------------------
-# Estatísticas
-# ----------------------------------------------------------------------------
-with aba_est:
-    um = df["umidade_percentual"]
-
-    st.subheader("Resumo estatístico")
-    def resumo(serie):
-        return {
-            "Leituras": serie.count(), "Média": serie.mean(), "Mediana": serie.median(),
-            "Desvio padrão": serie.std(), "Coef. de variação (%)": serie.std() / serie.mean() * 100,
-            "Mínimo": serie.min(), "P5": serie.quantile(.05), "P25": serie.quantile(.25),
-            "P75": serie.quantile(.75), "P95": serie.quantile(.95), "Máximo": serie.max(),
-            "Assimetria": serie.skew(),
-        }
-    tabela = pd.DataFrame({"Umidade (%)": resumo(um), "ADC (bruto)": resumo(df["valor_adc"])}).round(2)
-    st.dataframe(tabela, width="stretch")
-    st.caption("Assimetria negativa indica que a maior parte das leituras está em valores altos de umidade, "
-               "com uma cauda de leituras secas.")
-
-    st.subheader("Faixas de umidade")
-    faixas = pd.cut(
-        um, bins=[-0.01, limiar, 60, 90, 100],
-        labels=[f"Crítica (< {limiar}%)", f"Atenção ({limiar}-60%)", "Adequada (60-90%)", "Saturada (> 90%)"],
-    )
-    fx = faixas.value_counts(normalize=True).sort_index().mul(100).round(1).reset_index()
-    fx.columns = ["Faixa", "% das leituras"]
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        st.dataframe(fx, hide_index=True, width="stretch")
-    with c2:
-        fig = px.bar(fx, x="% das leituras", y="Faixa", orientation="h",
-                     color="Faixa", color_discrete_sequence=[BOMBA, VERDE_CLARO, OK, AGUA])
-        fig.update_layout(showlegend=False, yaxis_title=None)
-        st.plotly_chart(estilo(fig, 260), width="stretch")
-
-    st.subheader("Comparação por período do dia")
-    por_periodo = df.groupby("periodo_dia", observed=True).agg(
-        leituras=("umidade_percentual", "count"),
-        media=("umidade_percentual", "mean"),
-        mediana=("umidade_percentual", "median"),
-        desvio=("umidade_percentual", "std"),
-        pct_critico=("umidade_percentual", lambda x: (x < limiar).mean() * 100),
-        acionamentos=("bomba_on", "sum"),
-    ).round(2)
-    por_periodo.columns = ["Leituras", "Média (%)", "Mediana (%)", "Desvio padrão",
-                           f"% abaixo de {limiar}%", "Acionamentos"]
-    c1, c2 = st.columns([3, 2])
-    with c1:
-        st.dataframe(por_periodo, width="stretch")
-    with c2:
-        fig = px.box(df, x="periodo_dia", y="umidade_percentual", color_discrete_sequence=[AGUA],
-                     category_orders={"periodo_dia": list(por_periodo.index)})
-        fig.update_layout(xaxis_title=None, yaxis_title="Umidade (%)")
-        st.plotly_chart(estilo(fig, 300), width="stretch")
-
-    st.subheader("Velocidade de secagem do solo")
-    taxas = df["taxa_pph"].dropna()
-    if len(taxas) < 5:
-        st.info("Poucas leituras consecutivas sem bomba no filtro atual para calcular a secagem.")
+    if datas_ordenadas:
+        st.success("Os registros estão ordenados cronologicamente.")
     else:
-        secando = taxas[taxas < 0]
-        s1, s2, s3 = st.columns(3)
-        s1.metric("Secagem média", f"{secando.mean():.1f} p.p./h" if len(secando) else "-")
-        s2.metric("Secagem mais rápida (P5)", f"{taxas.quantile(.05):.1f} p.p./h")
-        s3.metric("Intervalos analisados", len(taxas))
-        fig = px.box(df.dropna(subset=["taxa_pph"]), x="hora", y="taxa_pph", color_discrete_sequence=[SOLO])
-        fig.add_hline(y=0, line_color=TINTA, line_width=1)
-        fig.update_layout(xaxis_title="Hora do dia", yaxis_title="Variação da umidade (p.p./h)")
-        st.plotly_chart(estilo(fig, 340), width="stretch")
-        st.caption("Considera só leituras seguidas (até 30 min) com a bomba desligada e sensor fora de 0% e 100%. "
-                   "Valores negativos indicam solo secando.")
+        st.warning("Os registros não estão totalmente ordenados por data.")
 
-    st.subheader("Em que umidade a bomba costuma ligar?")
-    bins = list(range(0, 101, 10))
-    df_b = df.assign(faixa_um=pd.cut(um, bins=bins, include_lowest=True))
-    prob = df_b.groupby("faixa_um", observed=True)["bomba_on"].agg(["mean", "count"]).reset_index()
-    prob["faixa"] = prob["faixa_um"].astype(str)
-    prob["pct"] = (prob["mean"] * 100).round(1)
-    fig = px.bar(prob, x="faixa", y="pct", text="count", color_discrete_sequence=[BOMBA])
-    fig.update_traces(texttemplate="n=%{text}", textposition="outside")
-    fig.update_layout(xaxis_title="Faixa de umidade (%)", yaxis_title="% das leituras com bomba ligada")
-    st.plotly_chart(estilo(fig, 340), width="stretch")
-    st.caption("Mostra a regra de acionamento na prática: onde a barra sobe, a bomba passa a ligar. "
-               "Se houver bomba ligada em faixas altas, vale checar o limiar configurado no equipamento.")
+    # RESULTADO GERAL
 
-    st.subheader("Correlações")
-    cor = pd.DataFrame({
-        "Umidade": um, "ADC": df["valor_adc"], "Hora": df["hora"], "Bomba ligada": df["bomba_on"].astype(int),
-    }).corr().round(2)
-    fig = px.imshow(cor, text_auto=True, zmin=-1, zmax=1,
-                    color_continuous_scale=[[0, BOMBA], [0.5, "#FFFFFF"], [1, AGUA]])
-    st.plotly_chart(estilo(fig, 380), width="stretch")
-
-    st.subheader("Estatísticas por dia")
-    dia = df.groupby("data").agg(
-        media=("umidade_percentual", "mean"), desvio=("umidade_percentual", "std"),
-        minima=("umidade_percentual", "min"), maxima=("umidade_percentual", "max"),
-        pct_critico=("umidade_percentual", lambda x: (x < limiar).mean() * 100),
-        acionamentos=("bomba_on", "sum"), segundos=("tempo_bomba_segundos", "sum"),
-    ).round(2)
-    dia.columns = ["Média (%)", "Desvio padrão", "Mínima (%)", "Máxima (%)",
-                   f"% abaixo de {limiar}%", "Acionamentos", "Segundos de bomba"]
-    st.dataframe(dia, width="stretch")
-
-# ----------------------------------------------------------------------------
-# Eficácia
-# ----------------------------------------------------------------------------
-with aba3:
-    st.markdown(
-        "Um **evento** é uma sequência de leituras seguidas com a bomba ligada. "
-        "O ganho é a diferença entre a umidade na primeira leitura do evento e na leitura seguinte ao fim dele."
+    validacao_ok = (
+        duplicados == 0 and
+        nulos == 0 and
+        umidade_fora == 0 and
+        estados_invalidos == 0 and
+        datas_ordenadas
     )
-    if ev.empty:
-        st.info("Nenhum acionamento no período selecionado.")
-    else:
-        e1, e2, e3, e4 = st.columns(4)
-        e1.metric("Eventos", len(ev))
-        e2.metric("Ganho médio de umidade", f"{ev['ganho'].mean():+.1f} p.p.")
-        e3.metric("Duração média", f"{ev['leituras_com_bomba'].mean() * 20:.0f} min")
-        e4.metric("Eventos longos (3+ leituras)", int((ev["leituras_com_bomba"] >= 3).sum()))
 
-        c1, c2 = st.columns(2)
-        with c1:
-            st.subheader("Umidade inicial × ganho")
-            fig = px.scatter(
-                ev, x="umidade_inicial", y="ganho", size="leituras_com_bomba",
-                color_discrete_sequence=[AGUA],
-                labels=dict(umidade_inicial="Umidade ao ligar (%)", ganho="Ganho (p.p.)",
-                            leituras_com_bomba="Leituras com bomba"),
-            )
-            st.plotly_chart(estilo(fig), width="stretch")
-        with c2:
-            st.subheader("Duração dos eventos")
-            fig = px.histogram(ev, x="leituras_com_bomba", color_discrete_sequence=[BOMBA])
-            fig.update_layout(xaxis_title="Leituras seguidas com bomba ligada", yaxis_title="Eventos")
-            fig.update_xaxes(dtick=1)
-            st.plotly_chart(estilo(fig), width="stretch")
+    st.markdown("---")
 
-        st.subheader("Eventos de irrigação")
-        st.dataframe(
-            ev.rename(columns={
-                "inicio": "Início", "fim": "Fim", "leituras_com_bomba": "Leituras com bomba",
-                "segundos_bomba": "Segundos de bomba", "umidade_inicial": "Umidade inicial (%)",
-                "umidade_final": "Umidade depois (%)", "ganho": "Ganho (p.p.)",
-            }),
-            width="stretch", hide_index=True,
+    if validacao_ok:
+        st.success(
+            "As verificações realizadas não identificaram inconsistências "
+            "nos critérios avaliados."
         )
-        st.caption("Eventos longos indicam que 2 s por ciclo podem ser pouco, "
-                   "ou que o solo estava muito seco quando a bomba ligou.")
+    else:
+        st.warning(
+            "Foram encontradas situações que precisam ser avaliadas "
+            "nos critérios de integridade."
+        )
 
-# ----------------------------------------------------------------------------
-# Qualidade
-# ----------------------------------------------------------------------------
-with aba4:
-    lacunas = df[df["intervalo_min"] > LIMITE_LACUNA_MIN]
-    q1, q2, q3, q4 = st.columns(4)
-    q1.metric("Leituras em 0%", int((df["umidade_percentual"] == 0).sum()))
-    q2.metric("Leituras em 100%", int((df["umidade_percentual"] == 100).sum()))
-    q3.metric("Lacunas na coleta", len(lacunas))
-    q4.metric("Valores ausentes", int(df.isna().sum().sum() - df["intervalo_min"].isna().sum()))
-
-    st.markdown(
-        "Leituras em 0% ou 100% costumam indicar sensor saturado ou fora da faixa de calibração."
+    st.caption(
+        "As verificações são executadas automaticamente sobre os dados "
+        "carregados do PostgreSQL. Elas não substituem a validação física "
+        "do sensor ou do sistema de irrigação."
     )
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Lacunas na coleta")
-        if lacunas.empty:
-            st.success("Nenhuma lacuna acima de 30 minutos no período.")
-        else:
-            t = lacunas[["data_hora", "intervalo_min"]].copy()
-            t["intervalo_min"] = (t["intervalo_min"] / 60).round(2)
-            st.dataframe(t.rename(columns={"data_hora": "Retomada em", "intervalo_min": "Horas sem dados"}),
-                         width="stretch", hide_index=True)
-    with c2:
-        st.subheader("Leituras saturadas")
-        sat = df[df["umidade_percentual"].isin([0, 100])][["data_hora", "umidade_percentual", "valor_adc"]]
-        st.dataframe(sat.rename(columns={"data_hora": "Data/hora", "umidade_percentual": "Umidade (%)",
-                                         "valor_adc": "ADC"}),
-                     width="stretch", hide_index=True, height=250)
 
-    st.subheader("Intervalo entre leituras (minutos)")
-    normal = df[df["intervalo_min"] <= LIMITE_LACUNA_MIN]["intervalo_min"]
-    fig = px.histogram(normal, nbins=15, color_discrete_sequence=[SOLO])
-    fig.update_layout(xaxis_title="Minutos", yaxis_title="Leituras", showlegend=False)
-    st.plotly_chart(estilo(fig, 300), width="stretch")
+# =========================================================
+# RODAPÉ
+# =========================================================
 
-# ----------------------------------------------------------------------------
-# Dados
-# ----------------------------------------------------------------------------
-with aba5:
-    st.dataframe(df.drop(columns=["data", "hora", "bomba_on", "intervalo_min"]),
-                 width="stretch", hide_index=True)
-    st.download_button(
-        "Baixar dados filtrados (CSV)",
-        df.drop(columns=["data", "hora", "bomba_on", "intervalo_min"]).to_csv(index=False).encode("utf-8"),
-        file_name="irrigacao_filtrado.csv",
-        mime="text/csv",
-    )
+st.markdown("---")
+
+st.markdown("""
+<div style="text-align:center; color:#65776b;">
+    🌱 Projeto Horta Inteligente |
+    Monitoramento • Banco de Dados • Ciência de Dados
+</div>
+""", unsafe_allow_html=True)
