@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from PIL import Image, ImageOps
 
 st.set_page_config(page_title="Horta Automatizada", page_icon="🌱", layout="wide")
 
@@ -83,6 +84,25 @@ def card(titulo, corpo):
     st.markdown(f'<div class="card"><h4>{titulo}</h4>{corpo}</div>', unsafe_allow_html=True)
 
 
+def achar_foto(*nomes):
+    """Procura a foto em imagens/ e na raiz do repositório."""
+    for nome in nomes:
+        for pasta in (IMG, Path(".")):
+            p = pasta / nome
+            if p.exists():
+                return p
+    return None
+
+
+def mostrar_foto(caminho, legenda, girar=0):
+    """Mostra a foto na orientação correta. girar: 90, 180 ou 270, se ainda ficar torta."""
+    img = ImageOps.exif_transpose(Image.open(caminho))
+    if girar:
+        img = img.rotate(girar, expand=True)
+    img.thumbnail((1200, 1200))
+    st.image(img, caption=legenda)
+
+
 def resumo(s):
     q1, q3 = s.quantile(.25), s.quantile(.75)
     return {"Observações": s.count(), "Média": s.mean(), "Mediana": s.median(),
@@ -109,6 +129,27 @@ if secao == "Projeto":
     k[2].metric("Limiar de irrigação", f"{LIMIAR}%")
     k[3].metric("Acionamentos da bomba", len(lig))
     st.write("")
+
+    # ----- Componentes e montagem (fotos no topo) -----
+    st.markdown("### Componentes e montagem")
+    e, f = st.columns([1, 2])
+    with e:
+        card("Hardware", "• Arduino UNO<br>• Sensor de umidade do solo capacitivo<br>• Módulo relé de 5 V<br>"
+                         "• Válvula solenoide de 12 V<br>• Display LCD 16x2 com potenciômetro<br>• Protoboard e jumpers")
+    with f:
+        foto1 = achar_foto("montagem_1.jpg", "IMG_5368.jpg", "componente1.jpg")
+        foto2 = achar_foto("montagem_2.jpg", "IMG_5369 (1).jpg", "componente2.jpg")
+        f1, f2 = st.columns(2)
+        if foto1:
+            with f1:
+                mostrar_foto(foto1, "Circuito: Arduino, relé, válvula e display")
+        if foto2:
+            with f2:
+                mostrar_foto(foto2, "Sensor no copo e leitura no LCD")
+        if not (foto1 and foto2):
+            st.warning("Foto não encontrada. Confira o nome do arquivo no GitHub.")
+
+    st.write("")
     a, b, c = st.columns(3)
     with a:
         card("Problema", "Regar a horta na hora certa, sem depender de alguém lembrar e sem desperdiçar água.")
@@ -131,18 +172,6 @@ if secao == "Projeto":
       Sensor -> Arduino [label="ADC"]; Arduino -> Rele [label="umidade < 40%"]; Rele -> Valvula [label="2 s"];
       Arduino -> Coletor [label="serial / USB"]; Coletor -> Banco [label="INSERT"]; Banco -> Painel [label="dados"];
     }''', width="stretch")
-
-    st.markdown("### Componentes e montagem")
-    e, f = st.columns([1, 2])
-    with e:
-        card("Hardware", "• Arduino UNO<br>• Sensor de umidade do solo capacitivo<br>• Módulo relé de 5 V<br>"
-                         "• Válvula solenoide de 12 V<br>• Display LCD 16x2 com potenciômetro<br>• Protoboard e jumpers")
-    with f:
-        fotos = [IMG / "montagem_1.jpg", IMG / "montagem_2.jpg"]
-        if all(p.exists() for p in fotos):
-            f1, f2 = st.columns(2)
-            f1.image(str(fotos[0]), caption="Circuito: Arduino, relé, válvula e display")
-            f2.image(str(fotos[1]), caption="Sensor no copo e leitura no LCD")
 
 # ============ 2. COLETA ============
 elif secao == "Coleta dos dados":
