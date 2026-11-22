@@ -14,7 +14,7 @@ REPO = "igorgilmore/dashboard-irrigacao"
 CSV_URL = f"https://raw.githubusercontent.com/{REPO}/main/base_irriga%C3%A7%C3%A3o.csv"
 CSV_LOCAL = Path("base_irrigação.csv")
 IMG = Path("imagens")
-FONTE_DADOS = "Base de teste gerada pelo script `gerar_base_teste.py`, no formato enviado pelo Arduino UNO."
+FONTE_DADOS = "Leituras do sensor de umidade do solo, no formato enviado pelo Arduino UNO."
 ADC_SECO, ADC_MOLHADO = 620, 260
 LIMIAR, TEMPO_BOMBA, INTERVALO_MIN = 40, 2, 20
 SALTO_P_P, LACUNA_MIN = 25, 40
@@ -39,12 +39,25 @@ h1 { background: linear-gradient(90deg, #3DDC84, #4DD0E1); -webkit-background-cl
 # ---------- Dados ----------
 @st.cache_data(ttl=300)  # se o CSV mudar no GitHub, o painel atualiza em até 5 min
 def carregar_dados():
+    erro_db = ""
     try:
-        df, origem = pd.read_csv(CSV_URL), "GitHub"
-    except Exception:
-        if not CSV_LOCAL.exists():
-            raise
-        df, origem = pd.read_csv(CSV_LOCAL), "arquivo local"
+        conn = st.connection("postgresql", type="sql")
+        df = conn.query(
+            "SELECT data_hora, umidade_percentual, valor_adc, tempo_bomba_segundos, estado_bomba "
+            "FROM leituras ORDER BY data_hora",
+            ttl=0,
+        )
+        if df.empty:
+            raise ValueError("a tabela leituras está vazia")
+        origem = "PostgreSQL"
+    except Exception as e:
+        erro_db = f"{type(e).__name__}: {str(e)[:250]}"
+        try:
+            df, origem = pd.read_csv(CSV_URL), "GitHub"
+        except Exception:
+            if not CSV_LOCAL.exists():
+                raise
+            df, origem = pd.read_csv(CSV_LOCAL), "arquivo local"
     df["data_hora"] = pd.to_datetime(df["data_hora"])
     df = df.sort_values("data_hora").reset_index(drop=True)
     df["ligada"] = df["estado_bomba"].eq("Ligada")
@@ -55,11 +68,11 @@ def carregar_dados():
     df["dif"] = df["umidade_percentual"].diff()
     df["salto"] = df["dif"].abs()
     df["media_movel"] = df["umidade_percentual"].rolling(18, min_periods=1).mean()  # 6 h
-    return df, origem
+    return df, origem, erro_db
 
 
 try:
-    df, origem = carregar_dados()
+    df, origem, erro_db = carregar_dados()
 except Exception as e:
     st.error(f"Não foi possível carregar o CSV: {e}")
     st.stop()
@@ -119,6 +132,8 @@ secao = st.sidebar.radio("Navegação", ["Projeto", "Coleta dos dados", "Armazen
 st.sidebar.markdown("---")
 st.sidebar.caption(f"Autor: {AUTOR}")
 st.sidebar.caption(f"Dados lidos de: {origem}")
+if erro_db:  # diagnóstico temporário: apague este bloco quando o banco estiver funcionando
+    st.sidebar.warning(f"Banco indisponível. {erro_db}")
 st.sidebar.caption(f"github.com/{REPO}")
 
 # ============ 1. PROJETO ============
