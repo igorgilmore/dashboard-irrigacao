@@ -418,5 +418,7 @@ elif secao == "Análise dos resultados":
         st.markdown("### Próximos passos")
         st.write("- Manter o `coletor.py` rodando de forma contínua e ampliar o período de análise.\n"
                  "- Ler os dados direto do banco no painel.\n"
-                 "- Ajustar o limiar e o tempo de acionamento com base nos resultados.")
+                 "- Ajustar o limiar e o tempo de acionamento com base nos resultados"
+                 "-Conectividade WiFi para monitoramento remoto"
+                 "-Múltiplas zonas de segurança".)
         st.caption(f"Período analisado: {periodo}. Fonte dos dados: {FONTE_DADOS}")
