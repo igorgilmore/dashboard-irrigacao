@@ -1,128 +1,139 @@
+from pathlib import Path
+
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from sqlalchemy import create_engine
-from sqlalchemy.engine import URL
 
 st.set_page_config(page_title="Apresentação do Projeto", page_icon="📊", layout="wide")
 
+CSV_PADRAO = Path("dados.csv")  # coloque o CSV na mesma pasta do app.py
+
 # ---------- Navegação ----------
-SECOES = ["Projeto", "Coleta dos dados", "Banco de dados", "Análise dos resultados"]
+SECOES = ["Projeto", "Coleta dos dados", "Armazenamento", "Análise dos resultados"]
 secao = st.sidebar.radio("Navegação", SECOES)
 st.sidebar.markdown("---")
-st.sidebar.caption("Autor: SEU NOME · Link do GitHub: https://github.com/SEU_USUARIO/SEU_REPO")
+arquivo = st.sidebar.file_uploader("Trocar o CSV (opcional)", type="csv")
+st.sidebar.caption("Autor: SEU NOME · GitHub: https://github.com/igorgilmore/dashboard-irrigacao")
 
 
-# ---------- Conexão com o PostgreSQL ----------
-@st.cache_resource
-def get_engine():
-    """Lê as credenciais de .streamlit/secrets.toml (seção [postgres])."""
-    c = st.secrets["postgres"]
-    url = URL.create(
-        "postgresql+psycopg2",
-        username=c["user"],
-        password=c["password"],
-        host=c["host"],
-        port=int(c.get("port", 5432)),
-        database=c["dbname"],
-    )
-    return create_engine(url, pool_pre_ping=True)
+# ---------- Dados ----------
+@st.cache_data
+def ler_csv(origem) -> pd.DataFrame:
+    for enc in ("utf-8", "latin-1"):
+        try:
+            if hasattr(origem, "seek"):
+                origem.seek(0)
+            return pd.read_csv(origem, sep=None, engine="python", encoding=enc)
+        except UnicodeDecodeError:
+            continue
+    raise ValueError("Não foi possível ler o CSV.")
 
 
-@st.cache_data(ttl=600)
-def consultar(sql: str) -> pd.DataFrame:
-    with get_engine().connect() as conn:
-        return pd.read_sql(sql, conn)
-
-
-def carregar_dados() -> pd.DataFrame:
-    try:
-        return consultar("SELECT * FROM minha_tabela")  # troque pela sua tabela
-    except Exception as e:
-        st.sidebar.error(f"Sem conexão com o banco: {e}")
-        # Dados de exemplo para a apresentação não quebrar
-        return pd.DataFrame({"categoria": ["A", "B", "C", "D"], "valor": [120, 80, 150, 60]})
+def carregar_dados() -> pd.DataFrame | None:
+    if arquivo is not None:
+        df = ler_csv(arquivo)
+    elif CSV_PADRAO.exists():
+        df = ler_csv(CSV_PADRAO)
+    else:
+        return None
+    # tenta converter colunas de data automaticamente
+    for col in df.select_dtypes(include="object").columns:
+        if any(k in col.lower() for k in ("data", "date", "hora", "time")):
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    return df
 
 
 df = carregar_dados()
 
+if df is None:
+    st.title("📊 Apresentação do Projeto")
+    st.warning("Coloque um arquivo `dados.csv` na pasta do app ou envie um CSV pela barra lateral.")
+    st.stop()
+
+num_cols = df.select_dtypes(include="number").columns.tolist()
+data_cols = df.select_dtypes(include="datetime").columns.tolist()
+cat_cols = [c for c in df.columns if c not in num_cols + data_cols]
+
 # ---------- 1. Projeto ----------
 if secao == "Projeto":
-    st.title("📊 Nome do Projeto")
+    st.title("💧 Nome do Projeto")
     st.subheader("Uma frase que resume o que o projeto faz")
-
-    col1, col2 = st.columns(2)
-    with col1:
+    c1, c2 = st.columns(2)
+    with c1:
         st.markdown("### Problema")
         st.write("Qual dor ou pergunta o projeto resolve?")
         st.markdown("### Objetivo")
         st.write("O que você queria alcançar?")
-    with col2:
+    with c2:
         st.markdown("### Tecnologias")
-        st.write("Python · Streamlit · Pandas · SQL · ...")
+        st.write("Python · Streamlit · Pandas · Plotly · PostgreSQL · ...")
         st.markdown("### Resultado esperado")
         st.write("Qual é o valor entregue?")
 
 # ---------- 2. Coleta ----------
 elif secao == "Coleta dos dados":
     st.title("🔎 Coleta dos dados")
-    st.write("De onde vêm os dados? (API, web scraping, formulário, planilha...)")
-
+    st.write("De onde vêm os dados? (sensores, API, planilha, formulário...)")
     c1, c2, c3 = st.columns(3)
-    c1.metric("Fonte", "NOME DA FONTE")
-    c2.metric("Registros coletados", f"{len(df)}")
-    c3.metric("Frequência", "Diária / Pontual")
-
-    st.markdown("#### Como foi feita a coleta")
-    st.code(
-        "import requests\n\n"
-        "resposta = requests.get('URL_DA_FONTE')\n"
-        "dados = resposta.json()",
-        language="python",
-    )
-    st.markdown("#### Amostra dos dados brutos")
-    st.dataframe(df, use_container_width=True)
-
-# ---------- 3. Banco de dados ----------
-elif secao == "Banco de dados":
-    st.title("🗄️ Armazenamento no banco de dados")
-    st.write("Qual banco foi usado e por quê? Como os dados ficam organizados?")
-
-    st.markdown("#### Estrutura da tabela")
-    st.code(
-        "CREATE TABLE minha_tabela (\n"
-        "    id INTEGER PRIMARY KEY,\n"
-        "    categoria TEXT,\n"
-        "    valor REAL\n"
-        ");",
-        language="sql",
+    c1.metric("Registros", f"{len(df):,}".replace(",", "."))
+    c2.metric("Colunas", df.shape[1])
+    if data_cols:
+        c3.metric("Período", f"{df[data_cols[0]].min():%d/%m/%Y} a {df[data_cols[0]].max():%d/%m/%Y}")
+    st.markdown("#### Amostra dos dados")
+    st.dataframe(df.head(50), use_container_width=True)
+    st.markdown("#### Colunas e tipos")
+    st.dataframe(
+        pd.DataFrame({"coluna": df.columns, "tipo": df.dtypes.astype(str).values,
+                      "nulos": df.isna().sum().values}),
+        use_container_width=True,
     )
 
-    st.markdown("#### Consulta ao vivo")
-    consulta = st.text_area("SQL (somente SELECT)", "SELECT * FROM minha_tabela LIMIT 20")
-    if st.button("Executar"):
-        if not consulta.strip().lower().startswith("select"):
-            st.warning("Por segurança, só consultas SELECT são permitidas.")
-        else:
-            try:
-                st.dataframe(consultar(consulta), use_container_width=True)
-            except Exception as e:
-                st.error(f"Erro na consulta: {e}")
+# ---------- 3. Armazenamento ----------
+elif secao == "Armazenamento":
+    st.title("🗄️ Armazenamento dos dados")
+    st.write("Como os dados são guardados e organizados.")
+    st.markdown("#### Estrutura (exemplo de tabela no PostgreSQL)")
+    tipos = {"int64": "INTEGER", "float64": "REAL", "datetime64[ns]": "TIMESTAMP"}
+    linhas = [f"    {c} {tipos.get(str(t), 'TEXT')}" for c, t in df.dtypes.items()]
+    st.code("CREATE TABLE minha_tabela (\n" + ",\n".join(linhas) + "\n);", language="sql")
+    st.info("Nesta apresentação os dados são lidos de um arquivo CSV exportado do banco.")
+    st.download_button("Baixar CSV", df.to_csv(index=False).encode("utf-8"), "dados.csv", "text/csv")
 
 # ---------- 4. Análise ----------
 elif secao == "Análise dos resultados":
     st.title("📈 Análise dos resultados")
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total", int(df["valor"].sum()))
-    c2.metric("Média", round(df["valor"].mean(), 1))
-    c3.metric("Maior valor", int(df["valor"].max()))
+    if not num_cols:
+        st.warning("O CSV não tem colunas numéricas para analisar.")
+        st.stop()
 
-    fig = px.bar(df, x="categoria", y="valor", title="Valor por categoria")
-    st.plotly_chart(fig, use_container_width=True)
+    if cat_cols:
+        filtro = st.selectbox("Filtrar por", ["(sem filtro)"] + cat_cols)
+        if filtro != "(sem filtro)":
+            valores = st.multiselect("Valores", sorted(df[filtro].dropna().unique()),
+                                     default=sorted(df[filtro].dropna().unique()))
+            df = df[df[filtro].isin(valores)]
+
+    metrica = st.selectbox("Variável", num_cols)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Média", f"{df[metrica].mean():.2f}")
+    c2.metric("Mínimo", f"{df[metrica].min():.2f}")
+    c3.metric("Máximo", f"{df[metrica].max():.2f}")
+    c4.metric("Desvio padrão", f"{df[metrica].std():.2f}")
+
+    if data_cols:
+        fig = px.line(df.sort_values(data_cols[0]), x=data_cols[0], y=metrica,
+                      title=f"{metrica} ao longo do tempo")
+        st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(px.histogram(df, x=metrica, title=f"Distribuição de {metrica}"),
+                    use_container_width=True)
+
+    if len(num_cols) > 1:
+        st.plotly_chart(px.imshow(df[num_cols].corr(), text_auto=".2f",
+                                  title="Correlação entre variáveis"),
+                        use_container_width=True)
 
     st.markdown("### Principais conclusões")
     st.write("- Insight 1\n- Insight 2\n- Insight 3")
-
     st.markdown("### Próximos passos")
     st.write("O que dá para melhorar ou expandir?")
