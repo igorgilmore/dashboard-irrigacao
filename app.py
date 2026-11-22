@@ -139,8 +139,8 @@ if secao == "Projeto":
         card("Hardware", "• Arduino UNO<br>• Sensor de umidade do solo capacitivo<br>• Módulo relé de 5 V<br>"
                          "• Válvula solenoide de 12 V<br>• Display LCD 16x2 com potenciômetro<br>• Protoboard e jumpers")
     with f:
-        foto1 = achar_foto("componente1.jpg", "montagem_1.jpg", "IMG_5368.jpg")
-        foto2 = achar_foto("componente2.jpg", "montagem_2.jpg", "IMG_5369 (1).jpg")
+        foto1 = achar_foto("componente1.jpg", "componente1.jpg.jpg", "montagem_1.jpg", "IMG_5368.jpg")
+        foto2 = achar_foto("componente2.jpg", "componente2.jpg.jpg", "montagem_2.jpg", "IMG_5369 (1).jpg")
         f1, f2 = st.columns(2)
         if foto1:
             with f1:
