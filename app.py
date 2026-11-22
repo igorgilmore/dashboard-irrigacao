@@ -85,12 +85,14 @@ def card(titulo, corpo):
 
 
 def achar_foto(*nomes):
-    """Procura a foto em imagens/ e na raiz do repositório."""
-    for nome in nomes:
+    """Procura a foto em imagens/ e na raiz, ignorando maiúsculas/minúsculas."""
+    alvos = [n.lower() for n in nomes]  # a ordem dos nomes define a prioridade
+    for alvo in alvos:
         for pasta in (IMG, Path(".")):
-            p = pasta / nome
-            if p.exists():
-                return p
+            if pasta.exists():
+                for p in pasta.iterdir():
+                    if p.is_file() and p.name.lower() == alvo:
+                        return p
     return None
 
 
@@ -137,8 +139,8 @@ if secao == "Projeto":
         card("Hardware", "• Arduino UNO<br>• Sensor de umidade do solo capacitivo<br>• Módulo relé de 5 V<br>"
                          "• Válvula solenoide de 12 V<br>• Display LCD 16x2 com potenciômetro<br>• Protoboard e jumpers")
     with f:
-        foto1 = achar_foto("montagem_1.jpg", "IMG_5368.jpg", "componente1.jpg")
-        foto2 = achar_foto("montagem_2.jpg", "IMG_5369 (1).jpg", "componente2.jpg")
+        foto1 = achar_foto("componente1.jpg", "montagem_1.jpg", "IMG_5368.jpg")
+        foto2 = achar_foto("componente2.jpg", "montagem_2.jpg", "IMG_5369 (1).jpg")
         f1, f2 = st.columns(2)
         if foto1:
             with f1:
