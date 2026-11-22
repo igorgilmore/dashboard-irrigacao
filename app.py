@@ -415,12 +415,13 @@ elif secao == "Análise dos resultados":
             f"5. **Qualidade:** {len(fora)} leituras fora da faixa do sensor, {len(lacunas)} lacunas de coleta e "
             f"{len(saltos)} saltos bruscos."
         )
-      st.markdown("### Próximos passos")
-st.write(
-    "- Manter o `coletor.py` rodando de forma contínua e ampliar o período de análise.\n"
-    "- Ler os dados direto do banco no painel.\n"
-    "- Ajustar o limiar e o tempo de acionamento com base nos resultados.\n"
-    "- Conectividade WiFi para monitoramento remoto.\n"
-    "- Múltiplas zonas de segurança."
-)
-st.caption(f"Período analisado: {periodo}. Fonte dos dados: {FONTE_DADOS}")
+with col_direita:                      # ou: if ..., with ..., etc.
+    st.markdown("### Próximos passos")
+    st.write(
+        "- Manter o `coletor.py` rodando de forma contínua e ampliar o período de análise.\n"
+        "- Ler os dados direto do banco no painel.\n"
+        "- Ajustar o limiar e o tempo de acionamento com base nos resultados.\n"
+        "- Conectividade WiFi para monitoramento remoto.\n"
+        "- Múltiplas zonas de segurança."
+    )
+    st.caption(f"Período analisado: {periodo}. Fonte dos dados: {FONTE_DADOS}")
